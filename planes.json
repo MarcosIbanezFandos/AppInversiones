@@ -1,0 +1,42 @@
+{
+  "vivienda": {
+    "Plan_piso_Valencia_2032": {
+      "house_price": 260000.0,
+      "entrada_pct": 20.0,
+      "years_house": 7,
+      "ahorro_actual_entrada": 15000.0,
+      "anual_return_house_input": 4.0
+    },
+    "Plan_estudio_Madrid_2029": {
+      "house_price": 180000.0,
+      "entrada_pct": 25.0,
+      "years_house": 4,
+      "ahorro_actual_entrada": 8000.0,
+      "anual_return_house_input": 3.5
+    }
+  },
+  "largo_plazo": {
+    "Fondo_indexado_largo_plazo_2055": {
+      "current_total": 12000.0,
+      "extra_savings": 3000.0,
+      "objetivo_final": 350000.0,
+      "years": 30,
+      "annual_return_input": 6.5,
+      "apply_tax": true,
+      "modo": "Creciente",
+      "initial_monthly": 150,
+      "salary_pct_input": 15.0
+    },
+    "Ahorro_financiero_2035": {
+      "current_total": 5000.0,
+      "extra_savings": 2000.0,
+      "objetivo_final": 80000.0,
+      "years": 10,
+      "annual_return_input": 5.0,
+      "apply_tax": true,
+      "modo": "Constante",
+      "initial_monthly": 300,
+      "salary_pct_input": 20.0
+    }
+  }
+}
