@@ -1833,58 +1833,24 @@ del universo completo (CSV) y asignándoles un valor en euros.
 
         st.subheader("🔎 Buscar y añadir activos a la cartera de análisis")
 
-        search_query = st.text_input(
-            "Busca un activo por nombre, ISIN o palabra clave",
-            value="",
-            help="Puedes escribir parte del nombre, el ISIN completo o cualquier palabra clave.",
+        # Desplegable con buscador interno de Streamlit (sin tabla aparte)
+        label_df = universe_df.copy()
+        label_df["Label"] = label_df.apply(
+            lambda r: f"{r.get('Name','')} ({r.get('ISIN','')}) - {r.get('Type','')} {r.get('Region','')}",
+            axis=1,
         )
 
-        search_results = pd.DataFrame()
+        options = ["(elige un activo)"] + label_df["Label"].tolist()
+        selected_label = st.selectbox(
+            "Escribe para buscar por nombre/ISIN y selecciona el activo",
+            options=options,
+            index=0,
+            help="Empieza a escribir y usa el buscador interno del desplegable para filtrar.",
+        )
+
         selected_row = None
-
-        if search_query.strip():
-            q = search_query.strip()
-            df = universe_df.copy()
-
-            # Búsqueda insensible a mayúsculas en Name, ISIN y Search_Key
-            mask = pd.Series(False, index=df.index)
-            if "ISIN" in df.columns:
-                mask |= df["ISIN"].astype(str).str.contains(q, case=False, na=False)
-            if "Name" in df.columns:
-                mask |= df["Name"].astype(str).str.contains(q, case=False, na=False)
-            if "Search_Key" in df.columns:
-                mask |= df["Search_Key"].astype(str).str.contains(q.lower(), case=False, na=False)
-
-            search_results = df.loc[mask].head(50).copy()
-
-            if search_results.empty:
-                st.warning("No se han encontrado activos que coincidan con la búsqueda.")
-            else:
-                st.markdown("**Resultados de búsqueda (máx. 50):**")
-
-                # Construimos una etiqueta legible para seleccionar 1 resultado
-                search_results["Label"] = search_results.apply(
-                    lambda r: f"{r.get('Name','')} ({r.get('ISIN','')})",
-                    axis=1,
-                )
-                options = ["(ninguno)"] + search_results["Label"].tolist()
-                selected_label = st.selectbox(
-                    "Selecciona un activo para añadirlo a tu cartera de análisis",
-                    options=options,
-                )
-
-                if selected_label != "(ninguno)":
-                    selected_row = search_results.loc[
-                        search_results["Label"] == selected_label
-                    ].iloc[0]
-
-                # Mostramos una tabla compacta de resultados
-                st.dataframe(
-                    search_results[
-                        ["Name", "ISIN", "Type", "Region", "Currency_Name", "ETF_Provider", "ETF_Subtype"]
-                    ].drop(columns=["ETF_Subtype"], errors="ignore"),
-                    use_container_width=True,
-                )
+        if selected_label != "(elige un activo)":
+            selected_row = label_df.loc[label_df["Label"] == selected_label].iloc[0]
 
         col_add1, col_add2 = st.columns(2)
         with col_add1:
