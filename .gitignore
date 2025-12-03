@@ -1,8 +1,4 @@
 cartera.json
 carteras.json
-activos_custom.jsoncartera.json
-carteras.json
 activos_custom.json
-cartera.json
-carteras.json
-activos_custom.json
+*.DS_Store
