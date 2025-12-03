@@ -1990,7 +1990,19 @@ del universo completo (CSV) y asignándoles un valor en euros.
                         use_container_width=True,
                     )
 
-                    # Distribución por región
+                    # ==========================
+                    # DETECCIÓN TEMA STREAMLIT
+                    # ==========================
+                    theme_base = st.get_option("theme.base")
+                    text_color = st.get_option("theme.textColor")
+                    if theme_base == "dark" or not text_color:
+                        text_color = "#FFFFFF"
+                    else:
+                        text_color = text_color or "#000000"
+
+                    # ==========================
+                    # 2️⃣ Distribución por región
+                    # ==========================
                     st.markdown("### 2️⃣ Distribución por región")
                     region_expo = (
                         portfolio_df.groupby("Region", dropna=False)["Value_€"]
@@ -2000,16 +2012,26 @@ del universo completo (CSV) y asignándoles un valor en euros.
                     region_expo["Weight_%"] = region_expo["Value_€"] / total_value * 100.0
 
                     fig_reg, ax_reg = plt.subplots()
-                    ax_reg.pie(
+                    fig_reg.patch.set_facecolor("none")
+                    ax_reg.set_facecolor("none")
+
+                    wedges, texts, autotexts = ax_reg.pie(
                         region_expo["Weight_%"],
                         labels=region_expo["Region"].fillna("Desconocida"),
                         autopct="%1.1f%%",
                         startangle=90,
                     )
                     ax_reg.axis("equal")
+
+                    # Textos del pie adaptados al tema
+                    for t in texts + autotexts:
+                        t.set_color(text_color)
+
                     st.pyplot(fig_reg)
 
-                    # Distribución por tipo
+                    # ==========================
+                    # 3️⃣ Distribución por tipo
+                    # ==========================
                     st.markdown("### 3️⃣ Distribución por tipo de activo")
                     type_expo = (
                         portfolio_df.groupby("Type", dropna=False)["Value_€"]
@@ -2019,6 +2041,9 @@ del universo completo (CSV) y asignándoles un valor en euros.
                     type_expo["Weight_%"] = type_expo["Value_€"] / total_value * 100.0
 
                     fig_type, ax_type = plt.subplots()
+                    fig_type.patch.set_facecolor("none")
+                    ax_type.set_facecolor("none")
+
                     ax_type.bar(
                         type_expo["Type"].fillna("Desconocido"),
                         type_expo["Weight_%"],
@@ -2026,9 +2051,19 @@ del universo completo (CSV) y asignándoles un valor en euros.
                     ax_type.set_ylabel("% de la cartera")
                     ax_type.set_xlabel("Tipo de activo")
                     plt.xticks(rotation=30, ha="right")
+
+                    # Colores de texto y ejes según tema
+                    ax_type.tick_params(colors=text_color)
+                    ax_type.yaxis.label.set_color(text_color)
+                    ax_type.xaxis.label.set_color(text_color)
+                    for spine in ax_type.spines.values():
+                        spine.set_color(text_color)
+
                     st.pyplot(fig_type)
 
-                    # Distribución por divisa
+                    # ==========================
+                    # 4️⃣ Distribución por divisa
+                    # ==========================
                     st.markdown("### 4️⃣ Distribución por divisa")
                     currency_expo = (
                         portfolio_df.groupby("Currency_Name", dropna=False)["Value_€"]
@@ -2038,6 +2073,9 @@ del universo completo (CSV) y asignándoles un valor en euros.
                     currency_expo["Weight_%"] = currency_expo["Value_€"] / total_value * 100.0
 
                     fig_cur, ax_cur = plt.subplots()
+                    fig_cur.patch.set_facecolor("none")
+                    ax_cur.set_facecolor("none")
+
                     ax_cur.bar(
                         currency_expo["Currency_Name"].fillna("Desconocida"),
                         currency_expo["Weight_%"],
@@ -2045,9 +2083,18 @@ del universo completo (CSV) y asignándoles un valor en euros.
                     ax_cur.set_ylabel("% de la cartera")
                     ax_cur.set_xlabel("Divisa")
                     plt.xticks(rotation=30, ha="right")
+
+                    ax_cur.tick_params(colors=text_color)
+                    ax_cur.yaxis.label.set_color(text_color)
+                    ax_cur.xaxis.label.set_color(text_color)
+                    for spine in ax_cur.spines.values():
+                        spine.set_color(text_color)
+
                     st.pyplot(fig_cur)
 
-                    # Distribución por subtipo de ETF (solo ETFs)
+                    # ==========================
+                    # 5️⃣ Distribución subtipo ETF
+                    # ==========================
                     st.markdown("### 5️⃣ Distribución por subtipo de ETF (solo ETFs)")
                     etf_only = portfolio_df[portfolio_df["Type"] == "ETF"].copy()
                     if etf_only.empty:
@@ -2061,6 +2108,9 @@ del universo completo (CSV) y asignándoles un valor en euros.
                         etf_sub_expo["Weight_%"] = etf_sub_expo["Value_€"] / total_value * 100.0
 
                         fig_sub, ax_sub = plt.subplots()
+                        fig_sub.patch.set_facecolor("none")
+                        ax_sub.set_facecolor("none")
+
                         ax_sub.bar(
                             etf_sub_expo["ETF_Subtype"].fillna("Sin clasificar"),
                             etf_sub_expo["Weight_%"],
@@ -2068,9 +2118,18 @@ del universo completo (CSV) y asignándoles un valor en euros.
                         ax_sub.set_ylabel("% de la cartera")
                         ax_sub.set_xlabel("Subtipo de ETF")
                         plt.xticks(rotation=30, ha="right")
+
+                        ax_sub.tick_params(colors=text_color)
+                        ax_sub.yaxis.label.set_color(text_color)
+                        ax_sub.xaxis.label.set_color(text_color)
+                        for spine in ax_sub.spines.values():
+                            spine.set_color(text_color)
+
                         st.pyplot(fig_sub)
 
-                    # Tabla resumen completa
+                    # ==========================
+                    # 6️⃣ Tabla resumen completa
+                    # ==========================
                     st.markdown("### 6️⃣ Tabla resumen completa de la cartera")
                     st.dataframe(
                         portfolio_df[
