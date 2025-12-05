@@ -472,46 +472,6 @@ with tab1:
     universo_df = load_universe_csv()
     custom_assets = load_custom_assets()
 
-    # Diccionario de metadatos:
-    # - Por nombre de activo: {nombre: {"tipo": ..., "isin": ...}}
-    # - Por ISIN: {isin: {"nombre": ..., "tipo": ..., "isin": ...}}
-    asset_meta_by_name = {}
-    asset_meta_by_isin = {}
-
-    def register_asset(name, tipo=None, isin=None):
-        name = str(name).strip()
-        isin = (str(isin).strip() if isin is not None else "").upper()
-        tipo = tipo or ""
-        if not name and not isin:
-            return
-
-        # Por nombre
-        if name:
-            if name not in asset_meta_by_name:
-                asset_meta_by_name[name] = {
-                    "tipo": tipo or "",
-                    "isin": isin or "",
-                }
-            else:
-                if not asset_meta_by_name[name].get("tipo") and tipo:
-                    asset_meta_by_name[name]["tipo"] = tipo
-                if not asset_meta_by_name[name].get("isin") and isin:
-                    asset_meta_by_name[name]["isin"] = isin
-
-        # Por ISIN
-        if isin:
-            if isin not in asset_meta_by_isin:
-                asset_meta_by_isin[isin] = {
-                    "nombre": name,
-                    "tipo": tipo or "",
-                    "isin": isin,
-                }
-            else:
-                if not asset_meta_by_isin[isin].get("nombre") and name:
-                    asset_meta_by_isin[isin]["nombre"] = name
-                if not asset_meta_by_isin[isin].get("tipo") and tipo:
-                    asset_meta_by_isin[isin]["tipo"] = tipo
-
     # --- Normalización de tipos de activo del CSV ---
     def normalize_asset_type(raw_type: str) -> str:
         """Normaliza el tipo de activo del CSV a las categorías usadas en la app."""
@@ -531,22 +491,6 @@ with tab1:
         if any(x in s for x in ["fund", "sicav", "fond"]):
             return "Fondo"
         return "Otro"
-
-    # Añadimos activos personalizados
-    for a in custom_assets:
-        nombre = a.get("nombre")
-        tipo = a.get("tipo") or ""
-        isin = a.get("isin") or ""
-        register_asset(nombre, tipo=tipo, isin=isin)
-
-    # Añadimos el universo completo (CSV)
-    if not universo_df.empty:
-        for _, row_uni in universo_df.iterrows():
-            nombre = row_uni.get("Name", "")
-            tipo_raw = row_uni.get("Type", "")
-            tipo_norm = normalize_asset_type(tipo_raw)
-            isin = row_uni.get("ISIN", "")
-            register_asset(nombre, tipo=tipo_norm, isin=isin)
 
     # UI para crear activos personalizados locales
     with st.expander("➕ Añadir activo personalizado a tu lista"):
@@ -633,30 +577,30 @@ with tab1:
             st.session_state["cartera_df"] = default_data.copy()
 
     # --- Catálogo de activos para el selector (Nombre + ISIN) ---
-    catalog_rows = []
+    # Construimos un DataFrame vectorizado (mucho más rápido que iterar fila a fila)
+    custom_rows = [
+        {
+            "Nombre": str(a.get("nombre", "")).strip(),
+            "ISIN": str(a.get("isin", "")).strip().upper(),
+            "Tipo": str(a.get("tipo", "")).strip(),
+        }
+        for a in custom_assets
+    ]
+    if custom_rows:
+        custom_catalog_df = pd.DataFrame(custom_rows)
+    else:
+        custom_catalog_df = pd.DataFrame(columns=["Nombre", "ISIN", "Tipo"])
 
-    # 1) Activos personalizados
-    for a in custom_assets:
-        catalog_rows.append(
-            {
-                "Nombre": str(a.get("nombre", "")).strip(),
-                "ISIN": str(a.get("isin", "")).strip().upper(),
-                "Tipo": str(a.get("tipo", "")).strip(),
-            }
-        )
-
-    # 2) Universo completo de Trade Republic (CSV)
     if not universo_df.empty:
-        for _, row_uni in universo_df.iterrows():
-            catalog_rows.append(
-                {
-                    "Nombre": str(row_uni.get("Name", "")).strip(),
-                    "ISIN": str(row_uni.get("ISIN", "")).strip().upper(),
-                    "Tipo": normalize_asset_type(row_uni.get("Type", "")),
-                }
-            )
+        universe_small = universo_df[["Name", "ISIN", "Type"]].copy()
+        universe_small["Nombre"] = universe_small["Name"].astype(str).str.strip()
+        universe_small["ISIN"] = universe_small["ISIN"].astype(str).str.strip().str.upper()
+        universe_small["Tipo"] = universe_small["Type"].apply(normalize_asset_type)
+        universe_small = universe_small[["Nombre", "ISIN", "Tipo"]]
+        catalog_df = pd.concat([custom_catalog_df, universe_small], ignore_index=True)
+    else:
+        catalog_df = custom_catalog_df.copy()
 
-    catalog_df = pd.DataFrame(catalog_rows)
     if not catalog_df.empty:
         catalog_df = catalog_df[(catalog_df["Nombre"] != "") & (catalog_df["ISIN"] != "")]
         catalog_df = catalog_df.drop_duplicates(subset="ISIN").reset_index(drop=True)
