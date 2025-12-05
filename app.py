@@ -156,6 +156,248 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# === Lógica financiera y de rebalanceo (antes en rebalance_marcos.py) ===
+class Portfolio:
+    def __init__(self, holdings: dict, targets: dict, asset_types: dict | None = None):
+        """
+        holdings: diccionario {activo: valor_actual_€}
+        targets:  diccionario {activo: peso_objetivo (0–1), sumando ~1}
+        asset_types: diccionario opcional {activo: tipo}
+        """
+        self.holdings = dict(holdings)
+        self.targets = dict(targets)
+        self.asset_types = dict(asset_types or {})
+
+    def total_value(self) -> float:
+        """Valor total actual de la cartera."""
+        return float(sum(self.holdings.values()))
+
+    def current_weights(self) -> dict:
+        """Pesos actuales (0–1) de cada activo en la cartera."""
+        total = self.total_value()
+        if total <= 0:
+            return {a: 0.0 for a in self.holdings}
+        return {a: float(v) / total for a, v in self.holdings.items()}
+
+
+def compute_contribution_plan(
+    portfolio: Portfolio,
+    monthly_contribution: float,
+    rebalance_threshold: float = 0.0,
+) -> dict:
+    """
+    Reparte la aportación mensual entre los activos de forma que:
+    - Se intente acercar cada activo a su peso objetivo tras la aportación.
+    - Nunca se venden activos (solo compras, contribuciones >= 0).
+    - Si el ideal implicara vender en algún activo, se reasigna a los infra ponderados.
+
+    rebalance_threshold se mantiene en la firma por compatibilidad, pero no se usa
+    dentro de esta función (el umbral se aplica luego en la lógica de ventas opcionales).
+    """
+    holdings = portfolio.holdings
+    targets = portfolio.targets
+    C = float(monthly_contribution)
+
+    if C <= 0 or not holdings:
+        return {a: 0.0 for a in holdings}
+
+    total0 = portfolio.total_value()
+    if total0 < 0:
+        total0 = 0.0
+    total1 = total0 + C
+
+    # 1) Contribuciones "ideales" para acabar justo en los pesos objetivo
+    raw_contribs: dict[str, float] = {}
+    for a, h in holdings.items():
+        t = float(targets.get(a, 0.0))
+        ideal_value = t * total1
+        raw = ideal_value - float(h)
+        raw_contribs[a] = max(0.0, raw)  # nunca vendemos
+
+    sum_raw = sum(raw_contribs.values())
+
+    # Caso límite: nadie está claramente infraponderado
+    if sum_raw <= 0:
+        sum_targets = sum(targets.values())
+        if sum_targets <= 0:
+            n = len(holdings)
+            if n == 0:
+                return {}
+            uniforme = C / n
+            return {a: uniforme for a in holdings}
+        return {
+            a: C * (float(targets.get(a, 0.0)) / sum_targets)
+            for a in holdings
+        }
+
+    # 2) Si la suma de "ideales" excede la aportación, escalamos todo
+    if sum_raw >= C:
+        scale = C / sum_raw
+        contribs = {a: raw_contribs[a] * scale for a in holdings}
+    else:
+        # 3) Si nos sobra aportación, repartimos el sobrante según los pesos objetivo
+        leftover = C - sum_raw
+        contribs = raw_contribs.copy()
+        sum_targets = sum(targets.values())
+        if sum_targets <= 0:
+            n = len(holdings)
+            extra_each = leftover / n if n > 0 else 0.0
+            for a in holdings:
+                contribs[a] += extra_each
+        else:
+            for a in holdings:
+                contribs[a] += leftover * (float(targets.get(a, 0.0)) / sum_targets)
+
+    return contribs
+
+
+def simulate_constant_plan(
+    current_total: float,
+    monthly_contribution: float,
+    years: int,
+    annual_return: float,
+    extra_savings: float = 0.0,
+):
+    """
+    Simula un plan con aportación mensual constante y rentabilidad anual constante.
+
+    Devuelve:
+    - valor final
+    - lista con el valor estimado mes a mes
+    """
+    months = int(years * 12)
+    r_m = float(annual_return) / 12.0
+    value = float(current_total) + float(extra_savings)
+    series = []
+
+    for _ in range(months):
+        value *= (1.0 + r_m)
+        value += float(monthly_contribution)
+        series.append(value)
+
+    return value, series
+
+
+def required_constant_monthly_for_goal(
+    current_total: float,
+    objetivo_final: float,
+    years: int,
+    annual_return: float,
+    extra_savings: float = 0.0,
+    tax_rate: float = 0.0,
+) -> int:
+    """
+    Calcula la aportación mensual CONSTANTE necesaria para alcanzar un objetivo bruto
+    'objetivo_final' en 'years' años, con rentabilidad anual 'annual_return'.
+
+    tax_rate se mantiene por compatibilidad pero no se usa aquí (los impuestos
+    se tratan explícitamente en la lógica de la app).
+    """
+    months = int(years * 12)
+    r_m = float(annual_return) / 12.0
+    pv = float(current_total) + float(extra_savings)
+
+    # Sin interés (o casi): reparto lineal
+    if abs(r_m) < 1e-12:
+        needed = objetivo_final - pv
+        if needed <= 0:
+            return 0
+        return int(round(needed / max(months, 1)))
+
+    factor = (1.0 + r_m) ** months
+    fv_pv = pv * factor
+
+    if fv_pv >= objetivo_final:
+        return 0
+
+    pmt = (objetivo_final - fv_pv) * r_m / (factor - 1.0)
+    return int(round(max(0.0, pmt)))
+
+
+def simulate_dca_ramp(
+    initial_monthly: float,
+    final_monthly: float,
+    years: int,
+    annual_return: float,
+    initial_value: float = 0.0,
+):
+    """
+    Simula aportaciones mensuales CRECIENTES de forma lineal entre initial_monthly
+    y final_monthly durante 'years' años.
+    """
+    months = int(years * 12)
+    r_m = float(annual_return) / 12.0
+    value = float(initial_value)
+    series = []
+
+    if months <= 0:
+        return value, series
+
+    for m in range(months):
+        if months > 1:
+            frac = m / (months - 1)
+        else:
+            frac = 1.0
+        contrib = float(initial_monthly) + (float(final_monthly) - float(initial_monthly)) * frac
+        value *= (1.0 + r_m)
+        value += contrib
+        series.append(value)
+
+    return value, series
+
+
+def required_growing_monthlies_for_goal(
+    current_total: float,
+    objetivo_final: float,
+    years: int,
+    annual_return: float,
+    initial_monthly: float,
+    extra_savings: float = 0.0,
+    tax_rate: float = 0.0,
+):
+    """
+    Dado un plan con aportaciones crecientes lineales desde initial_monthly hasta
+    una aportación final desconocida, busca (por búsqueda binaria) esa aportación
+    final necesaria para alcanzar 'objetivo_final' de forma BRUTA.
+
+    Devuelve:
+    - aportación mensual final aproximada
+    - una lista vacía (segundo valor se mantiene por compatibilidad con el código existente).
+    """
+    initial_value = float(current_total) + float(extra_savings)
+
+    # Comprobamos si ya llegamos usando aportación plana = initial_monthly
+    val0, _ = simulate_dca_ramp(
+        initial_monthly=initial_monthly,
+        final_monthly=initial_monthly,
+        years=years,
+        annual_return=annual_return,
+        initial_value=initial_value,
+    )
+    if val0 >= objetivo_final:
+        return int(round(initial_monthly)), []
+
+    low = float(initial_monthly)
+    high = max(float(initial_monthly) * 3.0, 5000.0)
+    final_val = val0
+
+    for _ in range(40):
+        mid = (low + high) / 2.0
+        val_mid, _ = simulate_dca_ramp(
+            initial_monthly=initial_monthly,
+            final_monthly=mid,
+            years=years,
+            annual_return=annual_return,
+            initial_value=initial_value,
+        )
+        if val_mid < objetivo_final:
+            low = mid
+        else:
+            high = mid
+            final_val = val_mid  # noqa: F841
+
+    return int(round(high)), []
+
 # --- Loader del universo de activos (CSV grande) ---
 @st.cache_data
 def load_universe_csv():
@@ -181,14 +423,6 @@ def load_universe_csv():
     except Exception:
         return pd.DataFrame()
 
-from rebalance_marcos import (
-    Portfolio,
-    compute_contribution_plan,
-    required_constant_monthly_for_goal,
-    simulate_constant_plan,
-    required_growing_monthlies_for_goal,
-    simulate_dca_ramp,
-)
 
 
 st.set_page_config(
@@ -657,197 +891,200 @@ with tab1:
             value=2.0,
         )
 
+    # --- Cálculo del plan de aportación en tiempo real ---
+    if df_activos.empty:
+        st.info(
+            "Añade al menos un activo en la tabla (con valor actual y peso objetivo) "
+            "para poder calcular el plan de aportación."
+        )
+    elif monthly_contribution <= 0:
+        st.info("Introduce una aportación mensual mayor que 0 para calcular el plan de aportación.")
+    else:
+        # Construir diccionarios para Portfolio
+        holdings = {}
+        targets = {}
+        asset_types = {}
 
-    if st.button("📊 Calcular plan de aportación para este mes"):
-        if df_activos.empty:
-            st.error("Añade al menos un activo en la tabla.")
-        elif monthly_contribution <= 0:
-            st.error("La aportación mensual debe ser mayor que 0.")
+        for _, row in df_activos.iterrows():
+            nombre = str(row["Activo"]).strip()
+            tipo = str(row["Tipo"]).strip()
+            valor = float(row["Valor_actual_€"])
+            peso_pct = float(row["Peso_objetivo_%"])
+
+            holdings[nombre] = valor
+            targets[nombre] = peso_pct / 100.0
+            asset_types[nombre] = tipo
+
+        # Normalizar targets si no suman 1
+        suma_targets = sum(targets.values())
+        if suma_targets == 0:
+            st.error("Los pesos objetivo no pueden ser todos cero.")
         else:
-            # Construir diccionarios para Portfolio
-            holdings = {}
-            targets = {}
-            asset_types = {}
+            if abs(suma_targets - 1.0) > 0.01:
+                st.info("Normalizando porcentajes objetivo para que sumen 100%.")
+                targets = {k: v / suma_targets for k, v in targets.items()}
 
-            for _, row in df_activos.iterrows():
-                nombre = str(row["Activo"]).strip()
-                tipo = str(row["Tipo"]).strip()
-                valor = float(row["Valor_actual_€"])
-                peso_pct = float(row["Peso_objetivo_%"])
+            portfolio = Portfolio(
+                holdings=holdings,
+                targets=targets,
+                asset_types=asset_types,
+            )
 
-                holdings[nombre] = valor
-                targets[nombre] = peso_pct / 100.0
-                asset_types[nombre] = tipo
+            rebalance_threshold = umbral_pct / 100.0
 
-            # Normalizar targets si no suman 1
-            suma_targets = sum(targets.values())
-            if suma_targets == 0:
-                st.error("Los pesos objetivo no pueden ser todos cero.")
-            else:
-                if abs(suma_targets - 1.0) > 0.01:
-                    st.info("Normalizando porcentajes objetivo para que sumen 100%.")
-                    targets = {k: v / suma_targets for k, v in targets.items()}
+            plan = compute_contribution_plan(
+                portfolio=portfolio,
+                monthly_contribution=float(monthly_contribution),
+                rebalance_threshold=rebalance_threshold,
+            )
 
-                portfolio = Portfolio(
-                    holdings=holdings,
-                    targets=targets,
-                    asset_types=asset_types,
-                )
+            st.subheader("✅ Plan de aportación sugerido (actualizado en tiempo real)")
 
-                rebalance_threshold = umbral_pct / 100.0
-
-                plan = compute_contribution_plan(
-                    portfolio=portfolio,
-                    monthly_contribution=float(monthly_contribution),
-                    rebalance_threshold=rebalance_threshold,
-                )
-
-                st.subheader("✅ Plan de aportación sugerido")
-
-                df_plan = pd.DataFrame(
-                    {
-                        "Activo": list(plan.keys()),
-                        "Aportación_mes_€": list(plan.values()),
-                    }
-                )
-
-                st.dataframe(df_plan)
-                st.markdown(
-                    "Esta tabla indica **cómo repartir la aportación del próximo mes** entre tus activos "
-                    "para acercarte a los porcentajes objetivo, **sin vender nada**, solo añadiendo dinero nuevo."
-                )
-
-                # Mostrar situación de la cartera antes y después de aplicar la aportación mensual
-                st.subheader("⚖️ Situación de la cartera: antes y después de la aportación")
-
-                total_actual = portfolio.total_value()
-                pesos_actuales = portfolio.current_weights()
-
-                # Valores y pesos después de aplicar el plan de aportación
-                total_despues = total_actual + float(monthly_contribution)
-                valores_despues = {
-                    a: holdings[a] + float(plan.get(a, 0.0)) for a in holdings.keys()
+            df_plan = pd.DataFrame(
+                {
+                    "Activo": list(plan.keys()),
+                    "Aportación_mes_€": list(plan.values()),
                 }
-                if total_despues > 0:
-                    pesos_despues = {
-                        a: valores_despues[a] / total_despues for a in holdings.keys()
-                    }
-                else:
-                    pesos_despues = {a: 0.0 for a in holdings.keys()}
+            )
 
-                df_pesos = pd.DataFrame(
-                    {
-                        "Activo": list(holdings.keys()),
-                        "Valor_antes_€": [holdings[a] for a in holdings.keys()],
-                        "Peso_antes_%": [pesos_actuales[a] * 100 for a in holdings.keys()],
-                        "Aportación_mes_€": [float(plan.get(a, 0.0)) for a in holdings.keys()],
-                        "Valor_despues_€": [valores_despues[a] for a in holdings.keys()],
-                        "Peso_despues_%": [pesos_despues[a] * 100 for a in holdings.keys()],
-                        "Peso_objetivo_%": [targets[a] * 100 for a in holdings.keys()],
-                    }
-                )
+            st.dataframe(df_plan)
+            st.markdown(
+                "Esta tabla indica **cómo repartir la aportación del próximo mes** entre tus activos "
+                "para acercarte a los porcentajes objetivo, **sin vender nada**, solo añadiendo dinero nuevo. "
+                "Se recalcula automáticamente cada vez que modificas la tabla o los parámetros."
+            )
 
-                st.dataframe(df_pesos)
+            # Mostrar situación de la cartera antes y después de aplicar la aportación mensual
+            st.subheader("⚖️ Situación de la cartera: antes y después de la aportación")
 
+            total_actual = portfolio.total_value()
+            pesos_actuales = portfolio.current_weights()
+
+            # Valores y pesos después de aplicar el plan de aportación
+            total_despues = total_actual + float(monthly_contribution)
+            valores_despues = {
+                a: holdings[a] + float(plan.get(a, 0.0)) for a in holdings.keys()
+            }
+            if total_despues > 0:
+                pesos_despues = {
+                    a: valores_despues[a] / total_despues for a in holdings.keys()
+                }
+            else:
+                pesos_despues = {a: 0.0 for a in holdings.keys()}
+
+            df_pesos = pd.DataFrame(
+                {
+                    "Activo": list(holdings.keys()),
+                    "Valor_antes_€": [holdings[a] for a in holdings.keys()],
+                    "Peso_antes_%": [pesos_actuales[a] * 100 for a in holdings.keys()],
+                    "Aportación_mes_€": [float(plan.get(a, 0.0)) for a in holdings.keys()],
+                    "Valor_despues_€": [valores_despues[a] for a in holdings.keys()],
+                    "Peso_despues_%": [pesos_despues[a] * 100 for a in holdings.keys()],
+                    "Peso_objetivo_%": [targets[a] * 100 for a in holdings.keys()],
+                }
+            )
+
+            st.dataframe(df_pesos)
+
+            st.markdown(
+                "En esta tabla puedes ver, para cada activo: "
+                "**valor y peso ANTES**, la **aportación del mes**, y el **valor y peso DESPUÉS** de aplicar el plan, "
+                "junto con el peso objetivo que quieres mantener.\n\n"
+                "Esto te ayuda a ver si la cartera se acerca a tus porcentajes objetivo usando solo dinero nuevo, "
+                "sin necesidad de vender posiciones."
+            )
+
+            # --- Escenario alternativo: incluir ventas si solo con compras no se entra en los porcentajes objetivo ---
+            # Comprobamos si, tras aplicar solo la aportación del mes, alguna posición sigue fuera del umbral
+            fuera_umbral = []
+            for a in holdings.keys():
+                peso_obj_pp = targets[a] * 100.0
+                peso_desp_pp = pesos_despues[a] * 100.0
+                diff_pp = abs(peso_desp_pp - peso_obj_pp)
+                if diff_pp > umbral_pct + 1e-6:
+                    fuera_umbral.append(a)
+
+            if fuera_umbral:
+                st.subheader("💸 Escenario con ventas para llegar exactamente a los porcentajes objetivo")
                 st.markdown(
-                    "En esta tabla puedes ver, para cada activo: "
-                    "**valor y peso ANTES**, la **aportación del mes**, y el **valor y peso DESPUÉS** de aplicar el plan, "
-                    "junto con el peso objetivo que quieres mantener.\n\n"
-                    "Esto te ayuda a ver si la cartera se acerca a tus porcentajes objetivo usando solo dinero nuevo, "
-                    "sin necesidad de vender posiciones."
+                    "Con solo la aportación de **este mes** no es posible dejar **todas** las posiciones dentro del "
+                    "umbral de rebalanceo definido. A continuación se muestra un escenario en el que, además de "
+                    "las compras del plan, se realizan **ventas mínimas necesarias** en los activos sobreponderados "
+                    "para llegar exactamente a los pesos objetivo."
                 )
 
-                # --- Escenario alternativo: incluir ventas si solo con compras no se entra en los porcentajes objetivo ---
-                # Comprobamos si, tras aplicar solo la aportación del mes, alguna posición sigue fuera del umbral
-                fuera_umbral = []
-                for a in holdings.keys():
-                    peso_obj_pp = targets[a] * 100.0
-                    peso_desp_pp = pesos_despues[a] * 100.0
-                    diff_pp = abs(peso_desp_pp - peso_obj_pp)
-                    if diff_pp > umbral_pct + 1e-6:
-                        fuera_umbral.append(a)
+                # Valor total tras aplicar únicamente la aportación (sin ventas)
+                total_despues_solo_compras = total_despues
 
-                if fuera_umbral:
-                    st.subheader("💸 Escenario con ventas para llegar exactamente a los porcentajes objetivo")
-                    st.markdown(
-                        "Con solo la aportación de **este mes** no es posible dejar **todas** las posiciones dentro del "
-                        "umbral de rebalanceo definido. A continuación se muestra un escenario en el que, además de "
-                        "las compras del plan, se realizan **ventas mínimas necesarias** en los activos sobreponderados "
-                        "para llegar exactamente a los pesos objetivo."
+                # Holdings ideales si pudiésemos rebalancear completamente con compras + ventas
+                ideal_holdings = {
+                    a: targets[a] * total_despues_solo_compras for a in holdings.keys()
+                }
+
+                ventas = {}
+                for a in holdings.keys():
+                    valor_con_aporte = valores_despues[a]
+                    delta = ideal_holdings[a] - valor_con_aporte
+                    venta = 0.0
+                    if delta < 0:
+                        # Necesitamos vender para bajar hasta el nivel ideal
+                        venta = -delta
+                    # Guardamos la venta redondeada a euros sin decimales
+                    ventas[a] = int(round(venta))
+
+                venta_total = sum(ventas.values())
+
+                if venta_total <= 1e-6:
+                    st.info(
+                        "En la práctica, las desviaciones son muy pequeñas y no merece la pena plantear ventas adicionales."
+                    )
+                else:
+                    # Valores finales después de aplicar ventas
+                    valores_final = {
+                        a: valores_despues[a] - ventas[a] for a in holdings.keys()
+                    }
+                    total_final = total_despues_solo_compras - venta_total
+                    if total_final <= 0:
+                        total_final = 1e-9
+                    pesos_final = {
+                        a: valores_final[a] / total_final for a in holdings.keys()
+                    }
+
+                    df_ventas = pd.DataFrame(
+                        {
+                            "Activo": list(holdings.keys()),
+                            "Tipo": [asset_types.get(a, "") for a in holdings.keys()],
+                            "Valor_antes_€": [holdings[a] for a in holdings.keys()],
+                            "Aportación_mes_€": [float(plan.get(a, 0.0)) for a in holdings.keys()],
+                            "Valor_despues_solo_compras_€": [valores_despues[a] for a in holdings.keys()],
+                            "Peso_despues_solo_compras_%": [pesos_despues[a] * 100 for a in holdings.keys()],
+                            "Peso_objetivo_%": [targets[a] * 100 for a in holdings.keys()],
+                            "Venta_necesaria_€": [ventas[a] for a in holdings.keys()],
+                            "Valor_final_post_venta_€": [valores_final[a] for a in holdings.keys()],
+                            "Peso_final_%": [pesos_final[a] * 100 for a in holdings.keys()],
+                        }
                     )
 
-                    # Valor total tras aplicar únicamente la aportación (sin ventas)
-                    total_despues_solo_compras = total_despues
+                    st.markdown(
+                        f"**Venta total mínima necesaria para alcanzar exactamente los pesos objetivo:** "
+                        f"≈ **{venta_total:,.0f} €**, repartida entre los activos sobreponderados."
+                    )
 
-                    # Holdings ideales si pudiésemos rebalancear completamente con compras + ventas
-                    ideal_holdings = {
-                        a: targets[a] * total_despues_solo_compras for a in holdings.keys()
-                    }
+                    # Tabla 1: resumen de ventas por activo (más compacta)
+                    st.markdown("##### 🧾 Resumen de ventas por activo")
+                    df_resumen_ventas = df_ventas[[
+                        "Activo",
+                        "Venta_necesaria_€",
+                        "Peso_despues_solo_compras_%",
+                        "Peso_final_%",
+                        "Peso_objetivo_%",
+                    ]].copy()
+                    st.dataframe(df_resumen_ventas)
 
-                    ventas = {}
-                    for a in holdings.keys():
-                        valor_con_aporte = valores_despues[a]
-                        delta = ideal_holdings[a] - valor_con_aporte
-                        venta = 0.0
-                        if delta < 0:
-                            # Necesitamos vender para bajar hasta el nivel ideal
-                            venta = -delta
-                        # Guardamos la venta redondeada a euros sin decimales
-                        ventas[a] = int(round(venta))
-
-                    venta_total = sum(ventas.values())
-
-                    if venta_total <= 1e-6:
-                        st.info(
-                            "En la práctica, las desviaciones son muy pequeñas y no merece la pena plantear ventas adicionales."
-                        )
-                    else:
-                        # Valores finales después de aplicar ventas
-                        valores_final = {
-                            a: valores_despues[a] - ventas[a] for a in holdings.keys()
-                        }
-                        total_final = total_despues_solo_compras - venta_total
-                        if total_final <= 0:
-                            total_final = 1e-9
-                        pesos_final = {
-                            a: valores_final[a] / total_final for a in holdings.keys()
-                        }
-
-                        df_ventas = pd.DataFrame(
-                            {
-                                "Activo": list(holdings.keys()),
-                                "Tipo": [asset_types.get(a, "") for a in holdings.keys()],
-                                "Valor_antes_€": [holdings[a] for a in holdings.keys()],
-                                "Aportación_mes_€": [float(plan.get(a, 0.0)) for a in holdings.keys()],
-                                "Valor_despues_solo_compras_€": [valores_despues[a] for a in holdings.keys()],
-                                "Peso_despues_solo_compras_%": [pesos_despues[a] * 100 for a in holdings.keys()],
-                                "Peso_objetivo_%": [targets[a] * 100 for a in holdings.keys()],
-                                "Venta_necesaria_€": [ventas[a] for a in holdings.keys()],
-                                "Valor_final_post_venta_€": [valores_final[a] for a in holdings.keys()],
-                                "Peso_final_%": [pesos_final[a] * 100 for a in holdings.keys()],
-                            }
-                        )
-
-                        st.markdown(
-                            f"**Venta total mínima necesaria para alcanzar exactamente los pesos objetivo:** "
-                            f"≈ **{venta_total:,.0f} €**, repartida entre los activos sobreponderados."
-                        )
-
-                        # Tabla 1: resumen de ventas por activo (más compacta)
-                        st.markdown("##### 🧾 Resumen de ventas por activo")
-                        df_resumen_ventas = df_ventas[[
-                            "Activo",
-                            "Venta_necesaria_€",
-                            "Peso_despues_solo_compras_%",
-                            "Peso_final_%",
-                            "Peso_objetivo_%",
-                        ]].copy()
-                        st.dataframe(df_resumen_ventas)
-
-                        st.caption(
-                            "Las cantidades de venta se calculan como la **venta mínima necesaria** para dejar cada activo "
-                            "en su peso objetivo, partiendo de la situación tras aplicar solo la aportación del mes."
-                        )
+                    st.caption(
+                        "Las cantidades de venta se calculan como la **venta mínima necesaria** para dejar cada activo "
+                        "en su peso objetivo, partiendo de la situación tras aplicar solo la aportación del mes."
+                    )
 
 
     # Gestión de carteras nombradas (guardado/carga en carteras.json)
